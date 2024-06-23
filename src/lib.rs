@@ -44,7 +44,7 @@ static POSITION_MATCH_RANGE: i16 = THROW_RESISTANCE_PER_1MM * ALLOWED_GEAR_DIFFE
 static RESISTANCE_BETWEEN_POSITIONS: i16 =
     THROW_RESISTANCE_PER_1MM * DISTANCE_BETWEEN_POSITIONS as i16;
 
-static THROW_TIME_PER_1MM: f32 = (TOTAL_THROW_TIME as f32 / TOTAL_THROW_DISTANCE as f32); // * 1000.0;
+static THROW_TIME_PER_1MM: f32 = TOTAL_THROW_TIME as f32 / TOTAL_THROW_DISTANCE as f32;
 static THROW_TIME_PER_GEAR: u64 = (THROW_TIME_PER_1MM * DISTANCE_BETWEEN_POSITIONS as f32) as u64;
 
 // =====
@@ -104,19 +104,19 @@ impl<'l, A: AdcPin> Actuator<'l, A> {
         self.motor_minus.set_low();
 
         // How long to keep the pin HIGH to move to the designated gear position.
-        let sleep = THROW_TIME_PER_GEAR * ((gears as i64).abs() as u64);
+        let move_time = THROW_TIME_PER_GEAR * ((gears as i64).abs() as u64);
         trace!(
-            "Move sleep='{}ms * {}gears = {}ms'",
+            "Move move_time='{}ms * {}gears = {}ms'",
             THROW_TIME_PER_GEAR,
             ((gears as i64).abs() as u64),
-            sleep
+            move_time
         );
 
         if gears < 0 {
             info!("Moving actuator: direction=FORWARD; gears={}", gears);
 
             self.motor_plus.set_high();
-            Timer::after_millis(sleep).await;
+            Timer::after_millis(move_time).await;
 
             self.motor_plus.set_low();
             Timer::after_millis(50).await;
@@ -124,7 +124,7 @@ impl<'l, A: AdcPin> Actuator<'l, A> {
             info!("Moving actuator: direction=BACKWARD; gears={}", gears);
 
             self.motor_minus.set_high();
-            Timer::after_millis(sleep).await;
+            Timer::after_millis(move_time).await;
 
             self.motor_minus.set_low();
             Timer::after_millis(50).await;
@@ -146,7 +146,7 @@ impl<'l, A: AdcPin> Actuator<'l, A> {
 
         // Move the actuator one mm BACKWARD.
         info!(
-            "Moving actuator BACKWARD 1mm (sleep={}ms)",
+            "Moving actuator BACKWARD 1mm (move_time={}ms)",
             THROW_TIME_PER_1MM
         );
         self.motor_plus.set_high();
@@ -159,7 +159,7 @@ impl<'l, A: AdcPin> Actuator<'l, A> {
 
         // Move the actuator one mm FORWARD.
         info!(
-            "Moving actuator FORWARD 1mm (sleep={}ms)",
+            "Moving actuator FORWARD 1mm (move_time={}ms)",
             THROW_TIME_PER_1MM
         );
         self.motor_minus.set_high();
