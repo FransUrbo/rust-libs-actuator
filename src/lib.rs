@@ -1,6 +1,6 @@
 #![no_std]
 
-use defmt::{error, info, trace};
+use defmt::{error, debug, info, trace};
 
 use embassy_rp::adc;
 use embassy_rp::adc::{
@@ -145,7 +145,7 @@ impl<'l, A: AdcPin> Actuator<'l, A> {
         trace!("Actuator test position (#1): {}", position_1);
 
         // Move the actuator one mm BACKWARD.
-        info!(
+        debug!(
             "Moving actuator BACKWARD 1mm (move_time={}ms)",
             THROW_TIME_PER_1MM
         );
@@ -158,7 +158,7 @@ impl<'l, A: AdcPin> Actuator<'l, A> {
         trace!("Actuator test position (#2): {}", position_2);
 
         // Move the actuator one mm FORWARD.
-        info!(
+        debug!(
             "Moving actuator FORWARD 1mm (move_time={}ms)",
             THROW_TIME_PER_1MM
         );
