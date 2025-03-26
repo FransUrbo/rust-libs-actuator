@@ -11,14 +11,14 @@ use embassy_time::Timer;
 
 use core::marker::PhantomData;
 
-// =====
+// ==============================
 // Setup static values, measured on the actuator.
 
 // The resistance on the actuator at MIN and MAX throw.
 // Measured on the actuator at endpoints, using the `read-actuator-pot` application.
 // The multimeter have different values though, so not sure exactly what value this is!
-static RESISTANCE_MIN_THROW: u16 = 245; // Ω
-static RESISTANCE_MAX_THROW: u16 = 1800; // Ω
+pub static RESISTANCE_THROW_MIN: u16 = 240; // Ω
+pub static RESISTANCE_THROW_MAX: u16 = 1922; // Ω
 
 // Measured values:
 // 'P' starts 10mm from outer endpoint.
@@ -29,39 +29,55 @@ static RESISTANCE_MAX_THROW: u16 = 1800; // Ω
 static RESISTANCE_PER_GEAR: u16 = 400;
 
 // Where the first gear mode is located (Ω from endpoint).
-static ACTUATOR_START_RESISTANCE: u16 = 30;
+static RESISTANCE_ACTUATOR_START: u16 = 290;
+
+// -----
 
 // The total throw from MIN to MAX is `101.56mm` (`3.9984"`).
-static TOTAL_THROW_DISTANCE: f32 = 101.56; // mm
-
-// Moving the actuator between endpoints takes about 2s@12V.
-static TOTAL_THROW_TIME: u16 = 2350; // ms
+static DISTANCE_THROW_TOTAL: f32 = 101.56; // mm
 
 // The distance between 'P' and 'D' is 70mm.
 static DISTANCE_BETWEEN_POSITIONS: f32 = (70 / 3) as f32; // mm
 
 // The allowed +/- value between MIN and MAX gear position is +/- 4mm.
-static ALLOWED_GEAR_DIFFERENCE_DISTANCE: u8 = 4; // mm
+static DISTANCE_ALLOWED_GEAR_DIFFERENCE: u8 = 4; // mm
 
-// =====
-// These are the actual information we're interested in.
-static TOTAL_THROW_RESISTANCE: u16 = RESISTANCE_MAX_THROW - RESISTANCE_MIN_THROW;
-static THROW_RESISTANCE_PER_1MM: u16 =
-    (TOTAL_THROW_RESISTANCE as f32 / TOTAL_THROW_DISTANCE) as u16;
+// -----
 
-pub static THROW_TIME_PER_1MM: u16 = (TOTAL_THROW_TIME as f32 / TOTAL_THROW_DISTANCE as f32) as u16;
-pub static THROW_TIME_PER_GEAR: u64 =
-    (THROW_TIME_PER_1MM as f32 * DISTANCE_BETWEEN_POSITIONS as f32) as u64;
+// Moving the actuator between endpoints takes about 2s@12V.
+// Make it public, so we can use it to test the actuator.
+pub static TIME_THROW_TOTAL: u64 = 2350; // ms
 
-static ALLOWED_GEAR_DIFFERENCE_RESISTANCE: u16 =
-    (ALLOWED_GEAR_DIFFERENCE_DISTANCE as u16) * THROW_RESISTANCE_PER_1MM;
+// These two are public, because if/when we need to test the actuator, we need to
+// know them..
+pub static TIME_THROW_1MM: u16 = (TIME_THROW_TOTAL as f32 / DISTANCE_THROW_TOTAL as f32) as u16;
+pub static TIME_THROW_GEAR: u64 =
+    (TIME_THROW_1MM as f32 * DISTANCE_BETWEEN_POSITIONS as f32) as u64;
+
+// ==============================
+// Calculate values based on the static's..
+
+static RESISTANCE_THROW_TOTAL: u16 = RESISTANCE_THROW_MAX - RESISTANCE_THROW_MIN;
+static RESISTANCE_THROW_1MM: u16 = (RESISTANCE_THROW_TOTAL as f32 / DISTANCE_THROW_TOTAL) as u16;
+
+static RESISTANCE_ALLOWED_GEAR_DIFFERENCE: u16 =
+    (DISTANCE_ALLOWED_GEAR_DIFFERENCE as u16) * RESISTANCE_THROW_1MM;
+
+// -----
 
 // Pre-calculate the proper gear mode positions, based on the start position
 // (which is where the 'D' mode is - max pulled in).
-static GEAR_D: u16 = ACTUATOR_START_RESISTANCE + (RESISTANCE_PER_GEAR * 1); // Button::D
-static GEAR_N: u16 = ACTUATOR_START_RESISTANCE + (RESISTANCE_PER_GEAR * 2); // Button::N
-static GEAR_R: u16 = ACTUATOR_START_RESISTANCE + (RESISTANCE_PER_GEAR * 3); // Button::R
-static GEAR_P: u16 = ACTUATOR_START_RESISTANCE + (RESISTANCE_PER_GEAR * 4); // Button::P
+static GEAR_D: u16 = RESISTANCE_ACTUATOR_START + (RESISTANCE_PER_GEAR * 1); // Button::D
+static GEAR_N: u16 = RESISTANCE_ACTUATOR_START + (RESISTANCE_PER_GEAR * 2); // Button::N
+static GEAR_R: u16 = RESISTANCE_ACTUATOR_START + (RESISTANCE_PER_GEAR * 3); // Button::R
+static GEAR_P: u16 = RESISTANCE_ACTUATOR_START + (RESISTANCE_PER_GEAR * 4); // Button::P
+
+// How many times to read the actuator potentiometer and get an average of the reads.
+// NOTE: 50ms delay between reads * this = time!! Don't query to many times, or we'll
+//       have to wait forever!!
+static READ_ACTUATOR_TIMES: u16 = 5;
+
+// ==============================
 
 #[derive(Copy, Clone, Format, PartialEq)]
 #[repr(u8)]
@@ -69,8 +85,6 @@ pub enum Direction {
     Forward,
     Backward,
 }
-
-// =====
 
 pub struct Actuator<'l, PotPin: AdcPin> {
     motor_plus: Output<'l>,
@@ -114,18 +128,18 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         trace!(
             "new(): Distance between gear positions={}mm; Throw time/mm={}ms; Trow time/gear={}ms",
             DISTANCE_BETWEEN_POSITIONS,
-            THROW_TIME_PER_1MM,
-            THROW_TIME_PER_GEAR
+            TIME_THROW_1MM,
+            TIME_THROW_GEAR
         );
         trace!(
             "new(): Throw resistance/mm={}Ω; Throw resistance/gear={}Ω",
-            THROW_RESISTANCE_PER_1MM,
+            RESISTANCE_THROW_1MM,
             RESISTANCE_PER_GEAR
         );
         trace!(
             "new(): Allowed gear difference (distance)={}mm; Allowed gear difference (resistance)={}Ω",
-            ALLOWED_GEAR_DIFFERENCE_DISTANCE,
-            ALLOWED_GEAR_DIFFERENCE_RESISTANCE
+            DISTANCE_ALLOWED_GEAR_DIFFERENCE,
+            RESISTANCE_ALLOWED_GEAR_DIFFERENCE
         );
 
         // Initialize our struct.
@@ -155,7 +169,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         );
 
         // Move actuator 2mm forward.
-        self.move_actuator((THROW_TIME_PER_1MM as u64) * 2, Direction::Forward)
+        self.move_actuator((TIME_THROW_1MM as u64) * 2, Direction::Forward)
             .await;
 
         // Give it 1/10s to settle.
@@ -175,7 +189,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         }
 
         // Move the actuator 2mm backward.
-        self.move_actuator((THROW_TIME_PER_1MM as u64) * 2, Direction::Backward)
+        self.move_actuator((TIME_THROW_1MM as u64) * 2, Direction::Backward)
             .await;
 
         // Give it 1/10s to settle.
@@ -252,10 +266,10 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         let gears: i8 = current_gear - mode as i8;
 
         // How long to keep the pin HIGH to move to the designated gear position.
-        let move_time = THROW_TIME_PER_GEAR * ((gears as i64).abs() as u64);
+        let move_time = TIME_THROW_GEAR * ((gears as i64).abs() as u64);
         trace!(
             "test_actuator(): Move move_time='{}ms * {}gears = {}ms'",
-            THROW_TIME_PER_GEAR,
+            TIME_THROW_GEAR,
             ((gears as i64).abs() as u64),
             move_time
         );
@@ -279,13 +293,13 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         let pot = self.read_pot().await;
 
         // Sanity check, just to make sure we don't get a value that is LOWER than the first mode.
-        if pot < ACTUATOR_START_RESISTANCE {
+        if pot < RESISTANCE_ACTUATOR_START {
             debug!("Can't find gear, no resonable value from pot - return 'Button::UNSET'");
             return 4; // Button::UNSET
         }
 
         // Calculate what gear is in by the actual actuator potentiometer value.
-        let current_gear_mode: u16 = (pot - ACTUATOR_START_RESISTANCE).try_into().unwrap();
+        let current_gear_mode: u16 = (pot - RESISTANCE_ACTUATOR_START).try_into().unwrap();
         trace!(
             "find_gear(): gear={}; GEAR_P={}; GEAR_R={}; GEAR_N={}; GEAR_D={}",
             current_gear_mode,
@@ -325,8 +339,8 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
             return false;
         }
 
-        let before_min = before - ALLOWED_GEAR_DIFFERENCE_RESISTANCE;
-        let before_max = before + ALLOWED_GEAR_DIFFERENCE_RESISTANCE;
+        let before_min = before - RESISTANCE_ALLOWED_GEAR_DIFFERENCE;
+        let before_max = before + RESISTANCE_ALLOWED_GEAR_DIFFERENCE;
         trace!(
             "verify_moved(): (after({}) > before_min({})) && (after({}) < before_max({}))",
             after,
@@ -346,8 +360,8 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
 
     // Simplify the check if a value falls within a certain tolerance.
     fn check_gear_position(&mut self, check: u16, validate: u16) -> bool {
-        if (check > (validate - ALLOWED_GEAR_DIFFERENCE_RESISTANCE))
-            && (check < (validate + ALLOWED_GEAR_DIFFERENCE_RESISTANCE))
+        if (check > (validate - RESISTANCE_ALLOWED_GEAR_DIFFERENCE))
+            && (check < (validate + RESISTANCE_ALLOWED_GEAR_DIFFERENCE))
         {
             return true;
         } else {
@@ -356,7 +370,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
     }
 
     // Given a gear mode position, move in small steps until the actuator potentiometer
-    // roughly matches (within `ALLOWED_GEAR_DIFFERENCE_RESISTANCE`Ω) that gear mode.
+    // roughly matches (within `RESISTANCE_ALLOWED_GEAR_DIFFERENCE`Ω) that gear mode.
     // TODO: Should we even have a specific position to move to, why not just go to 'P'?
     // TODO: With a third relay, we can choose between +5V and +12V,
     //       and switch to the +5V instead, which will move the actuator
@@ -417,7 +431,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
             // Check if the new position is near the value of the gear mode we wanted.
             if self.check_gear_position(position, dest) {
                 // We're done, we're at the desired gear mode.
-                // Within +/- `ALLOWED_GEAR_DIFFERENCE_RESISTANCE`Ω
+                // Within +/- `RESISTANCE_ALLOWED_GEAR_DIFFERENCE`Ω
                 self.v_select.set_low(); // Go back to using +12V for the actuator.
                 return true;
             } else if position > dest {
@@ -438,17 +452,45 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
     // ==================================================
 
     // Read the actuator potentiometer value.
-    // NOTE: Should probably get an average here.
-    //       https://rust-classes.com/chapter_embedded_pi_input
-    //       However, that takes forever! There's a really annoying delay before something
-    //       happens, so just take this value. However, it turns out it's within +/- 10Ω.
-    //       We can deal with that in the `check_gear_position()` method.
     pub async fn read_pot(&mut self) -> u16 {
-        match self.adc.read(&mut self.feedback).await {
-            Ok(val) => val as u16,
-            Err(e) => {
-                error!("Failed to read actuator porentiometer value: {:?}", e);
-                0
+        let mut measurements = [0u16; READ_ACTUATOR_TIMES as usize];
+        let mut pos = 0;
+        let mut lowest: u16 = 0;
+        let mut highest: u16 = 0;
+
+        loop {
+            match self.adc.read(&mut self.feedback).await {
+                Ok(val) => {
+                    trace!("Actuator read value: {:?}", val);
+
+                    measurements[pos] = val;
+                    pos = (pos + 1) % READ_ACTUATOR_TIMES as usize;
+                    if pos == 0 {
+                        // Compute average of measurements.
+                        let average = measurements.iter().sum::<u16>() / READ_ACTUATOR_TIMES;
+
+                        trace!(
+                            "Actuator lowest: {:?}; highest: {:?}; average: {:?}",
+                            lowest, highest, average
+                        );
+                        return average;
+                    }
+
+                    if lowest == 0 {
+                        lowest = val;
+                    } else if val < lowest {
+                        lowest = val;
+                    }
+                    if val > highest {
+                        highest = val;
+                    }
+
+                    Timer::after_millis(50).await;
+                }
+                Err(e) => {
+                    error!("Failed to read actuator porentiometer value: {:?}", e);
+                    return 0;
+                }
             }
         }
     }
