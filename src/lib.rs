@@ -31,11 +31,6 @@ static RESISTANCE_PER_GEAR: u16 = 400;
 // Where the first gear mode is located (Ω from endpoint).
 static RESISTANCE_ACTUATOR_START: u16 = 290;
 
-// -----
-
-// The total throw from MIN to MAX is `101.56mm` (`3.9984"`).
-static DISTANCE_THROW_TOTAL: f32 = 101.56; // mm
-
 // The distance between 'P' and 'D' is 70mm.
 static DISTANCE_BETWEEN_POSITIONS: f32 = (70 / 3) as f32; // mm
 
@@ -44,18 +39,26 @@ static DISTANCE_ALLOWED_GEAR_DIFFERENCE: u8 = 4; // mm
 
 // -----
 
+// NOTE: It is vital to get these two as exact as possible, because the
+//       time per mm is solely based on this value! If we can't
+//       correctly calculate how long it takes to move one millimeter,
+//       then we'll never be able to move to exact gear positions.
+
 // Moving the actuator between endpoints takes about 2s@12V.
 // Make it public, so we can use it to test the actuator.
-pub static TIME_THROW_TOTAL: u64 = 2350; // ms
+pub static TIME_THROW_TOTAL: u64 = 2100; // ms
+
+// The total throw from MIN to MAX is `101.56mm` (`3.9984"`).
+static DISTANCE_THROW_TOTAL: f32 = 101.56; // mm
+
+// ==============================
+// Calculate values based on the static's..
 
 // These two are public, because if/when we need to test the actuator, we need to
 // know them..
 pub static TIME_THROW_1MM: u16 = (TIME_THROW_TOTAL as f32 / DISTANCE_THROW_TOTAL as f32) as u16;
 pub static TIME_THROW_GEAR: u64 =
     (TIME_THROW_1MM as f32 * DISTANCE_BETWEEN_POSITIONS as f32) as u64;
-
-// ==============================
-// Calculate values based on the static's..
 
 static RESISTANCE_THROW_TOTAL: u16 = RESISTANCE_THROW_MAX - RESISTANCE_THROW_MIN;
 static RESISTANCE_THROW_1MM: u16 = (RESISTANCE_THROW_TOTAL as f32 / DISTANCE_THROW_TOTAL) as u16;
@@ -111,7 +114,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
 
         // Initialize the potentiometer pin.
         let adc = Adc::new(adc, irqs, Config::default());
-        let actuator_potentiometer = Channel::new_pin(pot_pin, Pull::Down);
+        let actuator_potentiometer = Channel::new_pin(pot_pin, Pull::None);
 
         // Setup the motor pins.
         // https://wiki.purduesigbots.com/electronics/general/output-drive
@@ -153,7 +156,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         }
     }
 
-    // Test actuator control. Move it backward 2mm, then forward 2mm.
+    // Test actuator control. Move it forward 2mm, then backward 2mm.
     // This *should* be safe to do EVEN IF (!!) we're moving (for whatever reason).
     // Returns:
     //   * TRUE  => Have moved. As in, it moved the distance back and forth and then returned.
@@ -162,49 +165,35 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         debug!("Testing actuator control");
 
         // Read start position (Ω).
-        let position_1: u16 = self.read_pot().await;
+        let position_start: u16 = self.read_pot().await;
         trace!(
             "test_actuator(): Actuator test position (#1): {}",
-            position_1
+            position_start
         );
 
         // Move actuator 2mm forward.
-        self.move_actuator((TIME_THROW_1MM as u64) * 2, Direction::Forward)
-            .await;
-
-        // Give it 1/10s to settle.
-        Timer::after_millis(100).await;
-
-        // Read position.
-        let position_2: u16 = self.read_pot().await;
-        trace!(
-            "test_actuator(): Actuator test position (#2): {}",
-            position_2
-        );
-
-        // Make sure the actuator moved.
-        if !self.verify_moved(position_1, position_2) {
+        if !self.move_actuator((TIME_THROW_1MM as u64) * 2, Direction::Backward).await {
             // Did not move - return test failure.
             return false;
-        }
+	}
 
-        // Move the actuator 2mm backward.
-        self.move_actuator((TIME_THROW_1MM as u64) * 2, Direction::Backward)
-            .await;
-
-        // Give it 1/10s to settle.
-        Timer::after_millis(100).await;
+        // Move actuator 2mm backward.
+        Timer::after_millis(50).await;
+        if !self.move_actuator((TIME_THROW_1MM as u64) * 2, Direction::Forward).await {
+            // Did not move - return test failure.
+            return false;
+	}
 
         // Read end position. Should be the same as start position..
-        let position_3: u16 = self.read_pot().await;
+        let position_end: u16 = self.read_pot().await;
         trace!(
             "test_actuator(): Actuator test position (#3): {}",
-            position_3
+            position_end
         );
 
         // =====
         // Verify overall move.
-        if self.verify_moved(position_1, position_3) {
+        if self.verify_moved(position_start, position_end) {
             // Have moved (it didn't return to original position) - return test failure.
             return false;
         }
@@ -213,39 +202,37 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         // The actuator worked, find what gear we're in.
         if self.find_gear().await == 4 {
             // UNSET. As in, we're in between gears!
-            // NOTE: We know where the actuator is *now* (`position_3`).
+            // NOTE: We know where the actuator is *now* (`position_end`).
             //       What is the closest gear mode from here?
-            if position_3 < (GEAR_R + ((GEAR_R - GEAR_P) / 2)) {
+            if position_end < (GEAR_R + ((GEAR_R - GEAR_P) / 2)) {
                 // Move to 'P'.
                 trace!(
-                    "test_actuator(): position_3={} < {}",
-                    position_3,
+                    "test_actuator(): position_end={} < {}",
+                    position_end,
                     (GEAR_R + ((GEAR_R - GEAR_P) / 2))
                 );
                 self.move_to_exact_position(0).await; // Button::P
-            } else if position_3 < (GEAR_N + ((GEAR_N - GEAR_R) / 2)) {
+            } else if position_end < (GEAR_N + ((GEAR_N - GEAR_R) / 2)) {
                 // Move to 'R'
                 trace!(
-                    "test_actuator(): position_3={} < {}",
-                    position_3,
+                    "test_actuator(): position_end={} < {}",
+                    position_end,
                     (GEAR_N + ((GEAR_N - GEAR_R) / 2))
                 );
                 self.move_to_exact_position(1).await; // Button::R
-            } else if position_3 < (GEAR_D + ((GEAR_D - GEAR_N) / 2)) {
+            } else if position_end < (GEAR_D + ((GEAR_D - GEAR_N) / 2)) {
                 // Move to 'N'
                 trace!(
-                    "test_actuator(): position_3={} < {}",
-                    position_3,
+                    "test_actuator(): position_end={} < {}",
+                    position_end,
                     (GEAR_D + ((GEAR_D - GEAR_N) / 2))
                 );
                 self.move_to_exact_position(2).await; // Button::N
             } else {
                 // Move to 'D'
-                trace!("test_actuator(): position_3={} (else)", position_3);
+                trace!("test_actuator(): position_end={} (else)", position_end);
                 self.move_to_exact_position(3).await; // Button::D
             }
-
-            return true; // For now, just return success.
         }
 
         return true;
@@ -350,11 +337,11 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         );
 
         if (after > before_min) && (after < before_max) {
-            trace!("verify_moved(): FALSE (Have NOT moved)");
-            return false;
-        } else {
             trace!("verify_moved(): TRUE (HAVE moved)");
             return true;
+        } else {
+            trace!("verify_moved(): FALSE (Have NOT moved)");
+            return false;
         }
     }
 
@@ -459,6 +446,9 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         let mut highest: u16 = 0;
 
         loop {
+            // Settle the actuator before we read.
+            Timer::after_millis(50).await;
+
             match self.adc.read(&mut self.feedback).await {
                 Ok(val) => {
                     trace!("Actuator read value: {:?}", val);
@@ -467,13 +457,16 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
                     pos = (pos + 1) % READ_ACTUATOR_TIMES as usize;
                     if pos == 0 {
                         // Compute average of measurements.
-                        let average = measurements.iter().sum::<u16>() / READ_ACTUATOR_TIMES;
+                        let average =
+                            (measurements.iter().sum::<u16>() / READ_ACTUATOR_TIMES) as f32;
 
                         trace!(
                             "Actuator lowest: {:?}; highest: {:?}; average: {:?}",
-                            lowest, highest, average
+                            lowest,
+                            highest,
+                            average as f32
                         );
-                        return average;
+                        return average as u16;
                     }
 
                     if lowest == 0 {
@@ -484,8 +477,6 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
                     if val > highest {
                         highest = val;
                     }
-
-                    Timer::after_millis(50).await;
                 }
                 Err(e) => {
                     error!("Failed to read actuator porentiometer value: {:?}", e);
@@ -495,7 +486,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         }
     }
 
-    // Move the actuator - distance.
+    // Move the actuator - distance (in milliseconds).
     pub async fn move_actuator(&mut self, distance: u64, direction: Direction) -> bool {
         // Set both pins to LOW to brake the motor in the actuator.
         // NOTE: The Arduino example say to set them HIGH, but that will turn ON the relays! (??)
@@ -503,13 +494,11 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         self.motor_plus.set_low();
         self.motor_minus.set_low();
 
-        // Start by getting a reading of the actuator potentiometer before we start moving it.
-        let actuator_pot_1 = self.read_pot().await;
-        debug!(
-            "Actuator potentiometer value - before move: {}",
-            actuator_pot_1
-        );
+        // Read the actuator feedback before we start moving.
+        let position_start = self.read_pot().await;
+        debug!("Actuator potentiometer value - before move: {}", position_start);
 
+	// Move actuator for Xms in `direction`.
         if direction == Direction::Forward {
             debug!(
                 "Moving actuator: direction=FORWARD; distance={}ms",
@@ -518,7 +507,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
 
             trace!("move_actuator(): (F1/4)");
             self.motor_plus.set_high();
-            trace!("move_actuator(): (F2/4)");
+            trace!("move_actuator(): (F2/4) - distance={}ms", distance);
             Timer::after_millis(distance).await;
             trace!("move_actuator(): (F3/4)");
             self.motor_plus.set_low();
@@ -531,27 +520,22 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
 
             trace!("move_actuator(): (B1/4)");
             self.motor_minus.set_high();
-            trace!("move_actuator(): (B2/4)");
+            trace!("move_actuator(): (B2/4) - distance={}ms", distance);
             Timer::after_millis(distance).await;
             trace!("move_actuator(): (B3/4)");
             self.motor_minus.set_low();
             trace!("move_actuator(): (B4/4)");
         }
 
+	// Read the actuator feedback now that we've moved.
+        let position_end = self.read_pot().await;
+        debug!("Actuator potentiometer value - after move: {}", position_end);
+
         // TODO: Verify with the potentiometer on the actuator that we've actually moved
         //       it to the right position.
-        trace!("move_actuator(): (R1/3)");
-        Timer::after_millis(50).await;
+	let verify = self.verify_moved(position_start, position_end);
 
-        trace!("move_actuator(): (R2/3)");
-        let actuator_pot_2 = self.read_pot().await;
-        trace!("move_actuator(): (R3/3)");
-
-        debug!(
-            "Actuator potentiometer value - after move: {}",
-            actuator_pot_2
-        );
-
-        return self.verify_moved(actuator_pot_1, actuator_pot_2);
+	// TODO: For now, just return if we've moved or not.
+        return verify;
     }
 }
