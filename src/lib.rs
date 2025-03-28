@@ -10,6 +10,8 @@ use embassy_rp::Peripheral;
 use embassy_time::Timer;
 
 use core::marker::PhantomData;
+use core::mem::transmute;
+use heapless::Vec;
 
 // ==============================
 // Setup static values, measured on the actuator.
@@ -89,12 +91,43 @@ pub enum Direction {
     Backward,
 }
 
+#[derive(Copy, Clone, Format)]
+#[repr(u8)]
+pub enum GearModes {
+    P,
+    R,
+    N,
+    D,
+}
+
+impl GearModes {
+    pub fn from_integer(v: u8) -> Self {
+        match v {
+            0 => Self::P,
+            1 => Self::R,
+            2 => Self::N,
+            3 => Self::D,
+            _ => panic!("Unknown value: {}", v),
+        }
+    }
+}
+
+impl From<u8> for GearModes {
+    fn from(t: u8) -> GearModes {
+        assert!(Self::P as u8 <= t && t <= Self::D as u8);
+        unsafe { transmute(t) }
+    }
+}
+
 pub struct Actuator<'l, PotPin: AdcPin> {
     motor_plus: Output<'l>,
     motor_minus: Output<'l>,
+    #[allow(dead_code)]
+    // TODO: Remove once we've figured out how to move the actuator to specific location.
     v_select: Output<'l>,
     feedback: Channel<'l>,
     adc: Adc<'l, Async>,
+    gear_positions: Vec<u16, 4>,
     phantom: PhantomData<&'l PotPin>,
 }
 
@@ -145,6 +178,13 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
             RESISTANCE_ALLOWED_GEAR_DIFFERENCE
         );
 
+        // Setup a vector with our gear mode positions.
+        let mut positions: Vec<u16, 4> = heapless::Vec::new(); // Return buffer.
+        positions.push(GEAR_D).unwrap();
+        positions.push(GEAR_N).unwrap();
+        positions.push(GEAR_R).unwrap();
+        positions.push(GEAR_P).unwrap();
+
         // Initialize our struct.
         Self {
             motor_plus: actuator_motor_plus,
@@ -152,6 +192,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
             v_select: actuator_voltage_select,
             feedback: actuator_potentiometer,
             adc: adc,
+            gear_positions: positions,
             phantom: PhantomData,
         }
     }
@@ -164,151 +205,135 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
     pub async fn test_actuator(&mut self) -> bool {
         debug!("Testing actuator control");
 
+        // ===== Verify that the actuator works by moving it back and forth.
+
         // Read start position (Ω).
         let position_start: u16 = self.read_pot().await;
         trace!(
-            "test_actuator(): Actuator test position (#1): {}",
+            "test_actuator(): Actuator test position (start): {}",
             position_start
         );
 
         // Move actuator 2mm forward.
-        if !self.move_actuator((TIME_THROW_1MM as u64) * 2, Direction::Backward).await {
+        debug!("test_actuator(): Move actuator 2mm forward");
+        if !self
+            .move_actuator((TIME_THROW_1MM as u64) * 2, Direction::Forward)
+            .await
+        {
             // Did not move - return test failure.
+            error!("Actuator have not moved - test failure (#1/3)");
             return false;
-	}
+        }
+        Timer::after_millis(50).await;
 
         // Move actuator 2mm backward.
-        Timer::after_millis(50).await;
-        if !self.move_actuator((TIME_THROW_1MM as u64) * 2, Direction::Forward).await {
+        debug!("test_actuator(): Move actuator 2mm backward");
+        if !self
+            .move_actuator((TIME_THROW_1MM as u64) * 2, Direction::Backward)
+            .await
+        {
             // Did not move - return test failure.
+            error!("Actuator have not moved - test failure (#2/3)");
             return false;
-	}
+        }
 
         // Read end position. Should be the same as start position..
         let position_end: u16 = self.read_pot().await;
         trace!(
-            "test_actuator(): Actuator test position (#3): {}",
+            "test_actuator(): Actuator test position (end): {}",
             position_end
         );
 
-        // =====
         // Verify overall move.
         if self.verify_moved(position_start, position_end) {
             // Have moved (it didn't return to original position) - return test failure.
+            error!("Actuator have not moved - test failure (#3/3)");
             return false;
         }
 
-        // =====
-        // The actuator worked, find what gear we're in.
-        if self.find_gear().await == 4 {
-            // UNSET. As in, we're in between gears!
-            // NOTE: We know where the actuator is *now* (`position_end`).
-            //       What is the closest gear mode from here?
-            if position_end < (GEAR_R + ((GEAR_R - GEAR_P) / 2)) {
-                // Move to 'P'.
-                trace!(
-                    "test_actuator(): position_end={} < {}",
-                    position_end,
-                    (GEAR_R + ((GEAR_R - GEAR_P) / 2))
-                );
-                self.move_to_exact_position(0).await; // Button::P
-            } else if position_end < (GEAR_N + ((GEAR_N - GEAR_R) / 2)) {
-                // Move to 'R'
-                trace!(
-                    "test_actuator(): position_end={} < {}",
-                    position_end,
-                    (GEAR_N + ((GEAR_N - GEAR_R) / 2))
-                );
-                self.move_to_exact_position(1).await; // Button::R
-            } else if position_end < (GEAR_D + ((GEAR_D - GEAR_N) / 2)) {
-                // Move to 'N'
-                trace!(
-                    "test_actuator(): position_end={} < {}",
-                    position_end,
-                    (GEAR_D + ((GEAR_D - GEAR_N) / 2))
-                );
-                self.move_to_exact_position(2).await; // Button::N
-            } else {
-                // Move to 'D'
-                trace!("test_actuator(): position_end={} (else)", position_end);
-                self.move_to_exact_position(3).await; // Button::D
-            }
+        // ===== Move the actuator to the nearest gear mode.
+
+        // Find our closest gear mode.
+        debug!("test_actuator(): Move actuator to closest gear mode");
+        let correct_position = self.find_closest_gear_mode(position_end);
+        trace!(
+            "test_actuator(): Current position={}; Correct position={}",
+            position_end,
+            correct_position
+        );
+
+        // Move the actuator into position.
+        let direction: Direction;
+        let amount: i16 = (correct_position as i16 - position_end as i16).abs();
+        if amount < 0 {
+            direction = Direction::Backward;
+        } else {
+            direction = Direction::Forward;
         }
+        self.move_actuator(amount as u64, direction).await;
 
         return true;
     }
 
     // Move the actuator to a specific gear mode position.
-    // TODO: Remove the `fake` param as soon as the actuator works as intended.
-    pub async fn change_gear_mode(&mut self, mode: u8, fake: i8) {
-        // Get the resistance feedback value from the actuator.
-        let current_gear = self.find_gear().await;
+    pub async fn change_gear_mode(&mut self, mode: GearModes) {
+        debug!("change_gear_mode({})", mode);
+
+        // Find current position.
+        let current_position = self.read_pot().await;
         debug!(
-            "change_gear_mode(): Found current gear mode: {:?}",
-            current_gear
-        );
-        let current_gear = fake; // TODO: Remove when actuator work as intended.
-
-        // Calculate the amount of gears and direction to move.
-        let gears: i8 = current_gear - mode as i8;
-
-        // How long to keep the pin HIGH to move to the designated gear position.
-        let move_time = TIME_THROW_GEAR * ((gears as i64).abs() as u64);
-        trace!(
-            "test_actuator(): Move move_time='{}ms * {}gears = {}ms'",
-            TIME_THROW_GEAR,
-            ((gears as i64).abs() as u64),
-            move_time
+            "change_gear_mode(): Actuator potentiometer value={}",
+            current_position
         );
 
-        // Move the actuator to the new gear mode position.
-        if gears < 0 {
-            self.move_actuator(move_time, Direction::Backward).await;
-        } else {
-            self.move_actuator(move_time, Direction::Forward).await;
+        // Find position for new gear mode.
+        let destination_position: u16;
+        match mode {
+            GearModes::P => destination_position = GEAR_P,
+            GearModes::R => destination_position = GEAR_R,
+            GearModes::N => destination_position = GEAR_N,
+            GearModes::D => destination_position = GEAR_D,
         }
+        debug!(
+            "change_gear_mode(): Destination position={}",
+            destination_position
+        );
+
+        // Move the actuator into position.
+        let direction: Direction;
+        let amount: i16 = (current_position as i16 - destination_position as i16).abs();
+        if amount < 0 {
+            direction = Direction::Backward;
+        } else {
+            direction = Direction::Forward;
+        }
+        self.move_actuator(amount as u64, direction).await;
     }
 
     // ==================================================
     // Private functions.
     // ==================================================
 
-    // Read the actuator potentiometer and translate the resistance from it to a gear mode positon.
-    async fn find_gear(&mut self) -> i8 {
-        // Get the actuator potentiometer value - ACTUAL position of the actuator.
-        // Manufacturer say between 0-10kΩ, depending on throw distance.
-        let pot = self.read_pot().await;
+    fn find_closest_gear_mode(&self, target: u16) -> u16 {
+        debug!("find_closest_gear_mode({})", target);
 
-        // Sanity check, just to make sure we don't get a value that is LOWER than the first mode.
-        if pot < RESISTANCE_ACTUATOR_START {
-            debug!("Can't find gear, no resonable value from pot - return 'Button::UNSET'");
-            return 4; // Button::UNSET
+        // Initialize variables to track the closest value and its difference
+        let mut closest_value = self.gear_positions[0];
+        let mut min_difference = u16::MAX;
+
+        // Iterate through the values and calculate the difference
+        for mode in &self.gear_positions {
+            trace!("let difference = {} - {}", mode, target);
+            let difference = mode - target;
+
+            // Update the closest value if a smaller difference is found
+            if difference < min_difference {
+                min_difference = difference;
+                closest_value = *mode;
+            }
         }
 
-        // Calculate what gear is in by the actual actuator potentiometer value.
-        let current_gear_mode: u16 = (pot - RESISTANCE_ACTUATOR_START).try_into().unwrap();
-        trace!(
-            "find_gear(): gear={}; GEAR_P={}; GEAR_R={}; GEAR_N={}; GEAR_D={}",
-            current_gear_mode,
-            GEAR_P,
-            GEAR_R,
-            GEAR_N,
-            GEAR_D
-        );
-
-        // Find the gear mode position, within a fault tolerance of the actuator
-        // potentiometer and reading (the Pico ADC isn't very precise).
-        if self.check_gear_position(current_gear_mode, GEAR_P) {
-            0 // Button::P
-        } else if self.check_gear_position(current_gear_mode, GEAR_R) {
-            1 // Button::R
-        } else if self.check_gear_position(current_gear_mode, GEAR_N) {
-            2 // Button::N
-        } else if self.check_gear_position(current_gear_mode, GEAR_D) {
-            3 // Button::D
-        } else {
-            4 // Button::UNSET
-        }
+        return closest_value;
     }
 
     // Check if after-move position is between pos1 max/min.
@@ -337,100 +362,11 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         );
 
         if (after > before_min) && (after < before_max) {
-            trace!("verify_moved(): TRUE (HAVE moved)");
-            return true;
-        } else {
-            trace!("verify_moved(): FALSE (Have NOT moved)");
+            debug!("verify_moved(): Moved=FALSE");
             return false;
-        }
-    }
-
-    // Simplify the check if a value falls within a certain tolerance.
-    fn check_gear_position(&mut self, check: u16, validate: u16) -> bool {
-        if (check > (validate - RESISTANCE_ALLOWED_GEAR_DIFFERENCE))
-            && (check < (validate + RESISTANCE_ALLOWED_GEAR_DIFFERENCE))
-        {
-            return true;
         } else {
-            return false;
-        }
-    }
-
-    // Given a gear mode position, move in small steps until the actuator potentiometer
-    // roughly matches (within `RESISTANCE_ALLOWED_GEAR_DIFFERENCE`Ω) that gear mode.
-    // TODO: Should we even have a specific position to move to, why not just go to 'P'?
-    // TODO: With a third relay, we can choose between +5V and +12V,
-    //       and switch to the +5V instead, which will move the actuator
-    //       slower.
-    async fn move_to_exact_position(&mut self, mode: u8) -> bool {
-        // Just define the variable..
-        let mut dest: u16 = 0;
-
-        // The way we calculate before calling this function, is that we're to far
-        // *behind* (backward) of the position we want to go, so we move *forward*.
-        let mut direction = Direction::Forward;
-
-        // Start with 1/10s.
-        let mut move_time: u64 = 100;
-
-        // Find out what resistance the potentiometer should read when we're done.
-        if mode == 0 {
-            // Button::P
-            dest = GEAR_P;
-        } else if mode == 1 {
-            // Button::R
-            dest = GEAR_R;
-        } else if mode == 2 {
-            // Button::N
-            dest = GEAR_N;
-        } else if mode == 3 {
-            // Button::D
-            dest = GEAR_D;
-        }
-        debug!(
-            "move_to_exact_position(mode={}): Wanted position: {}Ω",
-            mode, dest
-        );
-
-        // Keep moving the actuator until we've arrived at the destination.
-        loop {
-            // We read the potentiometer at the *end*, because we already know we're off..
-
-            // Move actuator.
-            if direction == Direction::Forward {
-                self.motor_plus.set_high();
-            } else {
-                self.motor_minus.set_high();
-            }
-            Timer::after_millis(move_time).await;
-
-            // Stop actuator. Simpler to just put both LOW, than figure out which one..
-            self.motor_plus.set_low();
-            self.motor_minus.set_low();
-
-            // Read the new position.
-            let position: u16 = self.read_pot().await;
-            trace!(
-                "move_to_exact_position(): new actuator potentiometer value: {}",
-                position
-            );
-
-            // Check if the new position is near the value of the gear mode we wanted.
-            if self.check_gear_position(position, dest) {
-                // We're done, we're at the desired gear mode.
-                // Within +/- `RESISTANCE_ALLOWED_GEAR_DIFFERENCE`Ω
-                self.v_select.set_low(); // Go back to using +12V for the actuator.
-                return true;
-            } else if position > dest {
-                // We moved too far, change the direction and lower the move time.
-                if direction == Direction::Forward {
-                    direction = Direction::Backward;
-                } else {
-                    direction = Direction::Forward;
-                }
-                move_time = move_time / 2 as u64;
-                self.v_select.set_high(); // Switch to +5V to make the actuator move slower.
-            } // else: keep moving.
+            debug!("verify_moved(): Moved=TRUE");
+            return true;
         }
     }
 
@@ -496,12 +432,15 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
 
         // Read the actuator feedback before we start moving.
         let position_start = self.read_pot().await;
-        debug!("Actuator potentiometer value - before move: {}", position_start);
+        debug!(
+            "move_actuator(): Actuator potentiometer value - before move: {}",
+            position_start
+        );
 
-	// Move actuator for Xms in `direction`.
+        // Move actuator for Xms in `direction`.
         if direction == Direction::Forward {
             debug!(
-                "Moving actuator: direction=FORWARD; distance={}ms",
+                "move_actuator(): Move actuator: direction=FORWARD; distance={}ms",
                 distance
             );
 
@@ -514,7 +453,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
             trace!("move_actuator(): (F4/4)");
         } else {
             debug!(
-                "Moving actuator: direction=BACKWARD; distance={}ms",
+                "move_actuator(): Move actuator: direction=BACKWARD; distance={}ms",
                 distance
             );
 
@@ -527,15 +466,18 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
             trace!("move_actuator(): (B4/4)");
         }
 
-	// Read the actuator feedback now that we've moved.
+        // Read the actuator feedback now that we've moved.
         let position_end = self.read_pot().await;
-        debug!("Actuator potentiometer value - after move: {}", position_end);
+        debug!(
+            "move_actuator(): Actuator potentiometer value - after move: {}",
+            position_end
+        );
 
         // TODO: Verify with the potentiometer on the actuator that we've actually moved
         //       it to the right position.
-	let verify = self.verify_moved(position_start, position_end);
+        let verify = self.verify_moved(position_start, position_end);
 
-	// TODO: For now, just return if we've moved or not.
+        // TODO: For now, just return if we've moved or not.
         return verify;
     }
 }
