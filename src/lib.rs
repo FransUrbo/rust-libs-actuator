@@ -6,10 +6,10 @@ use embassy_rp::adc::{Adc, AdcPin, Async, Channel, Config, InterruptHandler};
 use embassy_rp::gpio::{AnyPin, Drive, Level, Output, Pull, SlewRate};
 use embassy_rp::interrupt::typelevel::{Binding, ADC_IRQ_FIFO};
 use embassy_rp::peripherals::ADC;
-use embassy_rp::Peripheral;
+use embassy_rp::Peri;
 use embassy_time::Timer;
 
-use core::marker::PhantomData;
+//use core::marker::PhantomData;
 use core::mem::transmute;
 //use heapless::Vec;
 
@@ -71,7 +71,7 @@ static RESISTANCE_ALLOWED_GEAR_DIFFERENCE: u16 =
 
 // Pre-calculate the proper gear mode positions, based on the start position
 // (which is where the 'D' mode is - max pulled in).
-static GEAR_D: u16 = RESISTANCE_FIRST_GEAR;    // Button::D
+static GEAR_D: u16 = RESISTANCE_FIRST_GEAR;        // Button::D
 static GEAR_N: u16 = GEAR_D + RESISTANCE_PER_GEAR; // Button::N
 static GEAR_R: u16 = GEAR_N + RESISTANCE_PER_GEAR; // Button::R
 static GEAR_P: u16 = GEAR_R + RESISTANCE_PER_GEAR; // Button::P
@@ -118,7 +118,7 @@ impl From<u8> for GearModes {
     }
 }
 
-pub struct Actuator<'l, PotPin: AdcPin> {
+pub struct Actuator<'l> {
     motor_plus: Output<'l>,
     motor_minus: Output<'l>,
     #[allow(dead_code)]
@@ -126,17 +126,17 @@ pub struct Actuator<'l, PotPin: AdcPin> {
     v_select: Output<'l>,
     feedback: Channel<'l>,
     adc: Adc<'l, Async>,
-//    gear_positions: Vec<u16, 4>,
-    phantom: PhantomData<&'l PotPin>,
+    //gear_positions: Vec<u16, 4>,
+    //phantom: PhantomData<&'l PotPin>,
 }
 
-impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
+impl<'l> Actuator<'l> {
     pub fn new(
-        pin_motor_plus: AnyPin,
-        pin_motor_minus: AnyPin,
-        pin_volt_select: AnyPin,
-        pot_pin: PotPin,
-        adc: impl Peripheral<P = ADC> + 'l,
+        pin_motor_plus: Peri<'l, AnyPin>,
+        pin_motor_minus: Peri<'l, AnyPin>,
+        pin_volt_select: Peri<'l, AnyPin>,
+        pot_pin: Peri<'l, impl AdcPin + 'l>,
+        adc: Peri<'l, ADC>,
         irqs: impl Binding<ADC_IRQ_FIFO, InterruptHandler>,
     ) -> Self {
         // Initialize the motor pins.
@@ -170,24 +170,27 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
             "new(): Throw resistance/mm={}Ω; Throw resistance/gear={}Ω; Throw resistance/total={}Ω",
             RESISTANCE_THROW_1MM,
             RESISTANCE_PER_GEAR,
-	    RESISTANCE_THROW_TOTAL
+            RESISTANCE_THROW_TOTAL
         );
         trace!(
             "new(): Allowed gear difference={}mm/{}Ω",
             DISTANCE_ALLOWED_GEAR_DIFFERENCE,
             RESISTANCE_ALLOWED_GEAR_DIFFERENCE
         );
-	trace!(
-	    "new(): Positions: GearP={:?}Ω; GearR={:?}Ω; GearN={:?}Ω; GearD={:?}Ω",
-	    GEAR_P, GEAR_R, GEAR_N, GEAR_D
-	);
+        trace!(
+            "new(): Positions: GearP={:?}Ω; GearR={:?}Ω; GearN={:?}Ω; GearD={:?}Ω",
+            GEAR_P,
+            GEAR_R,
+            GEAR_N,
+            GEAR_D
+        );
 
-//        // Setup a vector with our gear mode positions.
-//        let mut positions: Vec<u16, 4> = heapless::Vec::new(); // Return buffer.
-//        positions.push(GEAR_D).unwrap();
-//        positions.push(GEAR_N).unwrap();
-//        positions.push(GEAR_R).unwrap();
-//        positions.push(GEAR_P).unwrap();
+        //        // Setup a vector with our gear mode positions.
+        //        let mut positions: Vec<u16, 4> = heapless::Vec::new(); // Return buffer.
+        //        positions.push(GEAR_D).unwrap();
+        //        positions.push(GEAR_N).unwrap();
+        //        positions.push(GEAR_R).unwrap();
+        //        positions.push(GEAR_P).unwrap();
 
         // Initialize our struct.
         Self {
@@ -196,8 +199,8 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
             v_select: actuator_voltage_select,
             feedback: actuator_potentiometer,
             adc: adc,
-//            gear_positions: positions,
-            phantom: PhantomData,
+            //            gear_positions: positions,
+            //            phantom: PhantomData,
         }
     }
 
@@ -249,32 +252,32 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         );
 
         // Verify overall move.
-        if self.verify_moved(position_start, position_end) {
+        if ! self.verify_moved(position_start, position_end) {
             // Have moved (it didn't return to original position) - return test failure.
             error!("Actuator have not moved - test failure (#3/3)");
             return false;
         }
 
-//        // ===== Move the actuator to the nearest gear mode.
-//
-//        // Find our closest gear mode.
-//        debug!("test_actuator(): Move actuator to closest gear mode");
-//        let correct_position = self.find_closest_gear_mode(position_end);
-//        trace!(
-//            "test_actuator(): Current position={}; Correct position={}",
-//            position_end,
-//            correct_position
-//        );
-//
-//        // Move the actuator into position.
-//        let direction: Direction;
-//        let amount: i16 = (correct_position as i16 - position_end as i16).abs();
-//        if amount < 0 {
-//            direction = Direction::Backward;
-//        } else {
-//            direction = Direction::Forward;
-//        }
-//        self.move_actuator(amount as u64, direction).await;
+        //        // ===== Move the actuator to the nearest gear mode.
+        //
+        //        // Find our closest gear mode.
+        //        debug!("test_actuator(): Move actuator to closest gear mode");
+        //        let correct_position = self.find_closest_gear_mode(position_end);
+        //        trace!(
+        //            "test_actuator(): Current position={}; Correct position={}",
+        //            position_end,
+        //            correct_position
+        //        );
+        //
+        //        // Move the actuator into position.
+        //        let direction: Direction;
+        //        let amount: i16 = (correct_position as i16 - position_end as i16).abs();
+        //        if amount < 0 {
+        //            direction = Direction::Backward;
+        //        } else {
+        //            direction = Direction::Forward;
+        //        }
+        //        self.move_actuator(amount as u64, direction).await;
 
         return true;
     }
@@ -285,10 +288,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
 
         // Find current position.
         let current_position = self.read_pot().await;
-        debug!(
-            "change_gear_mode(): Current position={}Ω",
-            current_position
-        );
+        debug!("change_gear_mode(): Current position={}Ω", current_position);
 
         // Find position for new gear mode.
         let destination_position: u16;
@@ -306,7 +306,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         // Move the actuator into position.
         let direction: Direction;
         let amount: i16 = (destination_position as i16 - current_position as i16).abs();
-	trace!("change_gear_mode(): amount={}", amount);
+        trace!("change_gear_mode(): amount={}", amount);
         if current_position < destination_position {
             direction = Direction::Forward;
         } else {
@@ -319,27 +319,27 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
     // Private functions.
     // ==================================================
 
-//    fn find_closest_gear_mode(&self, target: u16) -> u16 {
-//        debug!("find_closest_gear_mode({})", target);
-//
-//        // Initialize variables to track the closest value and its difference
-//        let mut closest_value = self.gear_positions[0];
-//        let mut min_difference = u16::MAX;
-//
-//        // Iterate through the values and calculate the difference
-//        for mode in &self.gear_positions {
-//            trace!("let difference = {} - {}", mode, target);
-//            let difference = mode - target;
-//
-//            // Update the closest value if a smaller difference is found
-//            if difference < min_difference {
-//                min_difference = difference;
-//                closest_value = *mode;
-//            }
-//        }
-//
-//        return closest_value;
-//    }
+    //    fn find_closest_gear_mode(&self, target: u16) -> u16 {
+    //        debug!("find_closest_gear_mode({})", target);
+    //
+    //        // Initialize variables to track the closest value and its difference
+    //        let mut closest_value = self.gear_positions[0];
+    //        let mut min_difference = u16::MAX;
+    //
+    //        // Iterate through the values and calculate the difference
+    //        for mode in &self.gear_positions {
+    //            trace!("let difference = {} - {}", mode, target);
+    //            let difference = mode - target;
+    //
+    //            // Update the closest value if a smaller difference is found
+    //            if difference < min_difference {
+    //                min_difference = difference;
+    //                closest_value = *mode;
+    //            }
+    //        }
+    //
+    //        return closest_value;
+    //    }
 
     // Check if after-move position is between pos1 max/min.
     // Returns:
@@ -356,26 +356,26 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
             return false;
         }
 
-	// TODO: This does not work if we're moving 2mm +/- in testing!
-	//RESISTANCE_THROW_1MM * 2
+        // TODO: This does not work if we're moving 2mm +/- in testing!
+        //RESISTANCE_THROW_1MM * 2
         let before_min = before - RESISTANCE_ALLOWED_GEAR_DIFFERENCE;
         let before_max = before + RESISTANCE_ALLOWED_GEAR_DIFFERENCE;
-	trace!(
-	    "verify_moved(): (after({}) > before_min({})) && (after({}) < before_max({})); Diff={}",
-	    after,
-	    before_min,
-	    after,
-	    before_max,
-	    RESISTANCE_ALLOWED_GEAR_DIFFERENCE
-	);
+        trace!(
+            "verify_moved(): (after({}) > before_min({})) && (after({}) < before_max({})); Diff={}",
+            after,
+            before_min,
+            after,
+            before_max,
+            RESISTANCE_ALLOWED_GEAR_DIFFERENCE
+        );
 
-	if (after > before_min) && (after < before_max) {
-	    debug!("verify_moved(): Moved=FALSE");
-	    return false;
-	} else {
-	    debug!("verify_moved(): Moved=TRUE");
-	    return true;
-	}
+        if (after > before_min) && (after < before_max) {
+            debug!("verify_moved(): Moved=TRUE");
+            return true;
+        } else {
+            debug!("verify_moved(): Moved=FALSE");
+            return false;
+        }
     }
 
     // ==================================================
@@ -391,9 +391,15 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
 
         loop {
             // Settle the actuator before we read.
-	    trace!("read_pot(): Sleeping 25ms");	// TODO-DEBUG
-	    Timer::after_millis(25).await;		// TODO: CRASH!!
-	    trace!("read_pot(): Sleeping 25ms - done");	// TODO-DEBUG
+	    // NOTE: CRASH - 25ms causes the Pico to crash!
+	    //       However, 50ms seems to work fine..
+            trace!("read_pot(): Sleeping 50ms");
+            Timer::after_millis(50).await;
+            trace!("read_pot(): Sleeping 50ms - done");
+	    // NOTE: CRASH - Something that 'done' debug works!
+	    //       Could it be the `adc.read()` that fails!?
+	    //       BUT, only on the initial boot! If the Pico have
+	    //       crashed, it keeps crashing on the `adc.read()`.
 
             match self.adc.read(&mut self.feedback).await {
                 Ok(val) => {
@@ -448,6 +454,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
         );
 
         // Move actuator for Xms in `direction`.
+	// TODO: It seems the timer crashes if the distance in ms is < 50ms!
         if direction == Direction::Forward {
             debug!(
                 "move_actuator(): Move actuator: direction=FORWARD; distance={}ms",
@@ -457,7 +464,7 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
             trace!("move_actuator(): (F1/4)");
             self.motor_plus.set_high();
             trace!("move_actuator(): (F2/4) - distance={}ms", distance);
-            Timer::after_millis(distance).await;	// TODO: CRASH!!
+            Timer::after_millis(distance).await; // TODO: CRASH!!
             trace!("move_actuator(): (F3/4)");
             self.motor_plus.set_low();
             trace!("move_actuator(): (F4/4)");
@@ -470,25 +477,22 @@ impl<'l, PotPin: AdcPin> Actuator<'l, PotPin> {
             trace!("move_actuator(): (B1/4)");
             self.motor_minus.set_high();
             trace!("move_actuator(): (B2/4) - distance={}ms", distance);
-            Timer::after_millis(distance).await;	// TODO: CRASH!!
+            Timer::after_millis(distance).await; // TODO: CRASH!!
             trace!("move_actuator(): (B3/4)");
             self.motor_minus.set_low();
             trace!("move_actuator(): (B4/4)");
         }
 
         // Read the actuator feedback now that we've moved.
-	trace!("move_actuator(): Reading pot..");
+        trace!("move_actuator(): Reading pot..");
         let position_end = self.read_pot().await;
         debug!(
             "move_actuator(): Actuator potentiometer value - after move: {}",
             position_end
         );
 
-        // TODO: Verify with the potentiometer on the actuator that we've actually moved
-        //       it to the right position.
-        let verify = self.verify_moved(position_start, position_end);
-
-        // TODO: For now, just return if we've moved or not.
-        return verify;
+        // Verify with the potentiometer on the actuator that we've actually moved
+        // it to the right position.
+        return self.verify_moved(position_start, position_end);
     }
 }
