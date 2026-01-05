@@ -1,6 +1,6 @@
 #![no_std]
 
-use defmt::{debug, error, trace, Format};
+use defmt::{info, debug, error, trace, Format};
 
 use embassy_rp::adc::{Adc, AdcPin, Async, Channel, Config, InterruptHandler};
 use embassy_rp::gpio::{AnyPin, Drive, Level, Output, Pull, SlewRate};
@@ -160,25 +160,25 @@ impl<'l> Actuator<'l> {
         actuator_voltage_select.set_slew_rate(SlewRate::Fast);
 
         // Output some basic info we're using.
-        trace!(
-            "new(): Distance between gear positions={}mm; Throw time/mm={}ms; Trow time/gear={}ms",
+        info!(
+            "Distance between gear positions={}mm; Throw time/mm={}ms; Trow time/gear={}ms",
             DISTANCE_BETWEEN_POSITIONS,
             TIME_THROW_1MM,
             TIME_THROW_GEAR
         );
-        trace!(
-            "new(): Throw resistance/mm={}Ω; Throw resistance/gear={}Ω; Throw resistance/total={}Ω",
+        info!(
+            "Throw resistance/mm={}Ω; Throw resistance/gear={}Ω; Throw resistance/total={}Ω",
             RESISTANCE_THROW_1MM,
             RESISTANCE_PER_GEAR,
             RESISTANCE_THROW_TOTAL
         );
-        trace!(
-            "new(): Allowed gear difference={}mm/{}Ω",
+        info!(
+            "Allowed gear difference={}mm/{}Ω",
             DISTANCE_ALLOWED_GEAR_DIFFERENCE,
             RESISTANCE_ALLOWED_GEAR_DIFFERENCE
         );
-        trace!(
-            "new(): Positions: GearP={:?}Ω; GearR={:?}Ω; GearN={:?}Ω; GearD={:?}Ω",
+        info!(
+            "Positions: GearP={:?}Ω; GearR={:?}Ω; GearN={:?}Ω; GearD={:?}Ω",
             GEAR_P,
             GEAR_R,
             GEAR_N,
@@ -199,8 +199,8 @@ impl<'l> Actuator<'l> {
             v_select: actuator_voltage_select,
             feedback: actuator_potentiometer,
             adc: adc,
-            //            gear_positions: positions,
-            //            phantom: PhantomData,
+            //gear_positions: positions,
+            //phantom: PhantomData,
         }
     }
 
@@ -210,7 +210,7 @@ impl<'l> Actuator<'l> {
     //   * TRUE  => Have moved. As in, it moved the distance back and forth and then returned.
     //   * FALSE => Have not moved.
     pub async fn test_actuator(&mut self) -> bool {
-        debug!("Testing actuator control");
+        info!("Testing actuator control");
 
         // ===== Verify that the actuator works by moving it back and forth.
 
@@ -252,7 +252,9 @@ impl<'l> Actuator<'l> {
         );
 
         // Verify overall move.
-        if ! self.verify_moved(position_start, position_end) {
+        let moved = self.verify_moved(position_start, position_end);
+        info!("Verifying total move ({}/{}): {}", position_start, position_end, moved);
+        if ! moved {
             // Have moved (it didn't return to original position) - return test failure.
             error!("Actuator have not moved - test failure (#3/3)");
             return false;
@@ -389,6 +391,7 @@ impl<'l> Actuator<'l> {
         let mut lowest: u16 = 0;
         let mut highest: u16 = 0;
 
+        debug!("Reading actuator potentiometer value");
         loop {
             // Settle the actuator before we read.
 	    // NOTE: CRASH - 25ms causes the Pico to crash!
@@ -412,7 +415,7 @@ impl<'l> Actuator<'l> {
                         let average =
                             (measurements.iter().sum::<u16>() / READ_ACTUATOR_TIMES) as f32;
 
-                        trace!(
+                        debug!(
                             "Actuator lowest: {:?}; highest: {:?}; average: {:?}",
                             lowest,
                             highest,
@@ -440,6 +443,8 @@ impl<'l> Actuator<'l> {
 
     // Move the actuator - distance (in milliseconds).
     pub async fn move_actuator(&mut self, distance: u64, direction: Direction) -> bool {
+        debug!("Moving actuator: {}/{}", distance, direction);
+
         // Set both pins to LOW to brake the motor in the actuator.
         // NOTE: The Arduino example say to set them HIGH, but that will turn ON the relays! (??)
         // https://www.progressiveautomations.com/blogs/how-to/how-to-use-relays-to-control-linear-actuators
