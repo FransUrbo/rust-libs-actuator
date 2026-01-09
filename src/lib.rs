@@ -1,6 +1,6 @@
 #![no_std]
 
-use defmt::{info, debug, error, trace, Format};
+use defmt::{debug, error, info, trace, Format};
 
 use embassy_rp::adc::{Adc, AdcPin, Async, Channel, Config, InterruptHandler};
 use embassy_rp::gpio::{AnyPin, Drive, Level, Output, Pull, SlewRate};
@@ -57,9 +57,8 @@ static DISTANCE_THROW_TOTAL: f32 = 101.56; // mm
 
 // These two are public, because if/when we need to test the actuator, we need to
 // know them..
-pub static TIME_THROW_1MM: u16 = (TIME_THROW_TOTAL as f32 / DISTANCE_THROW_TOTAL as f32) as u16;
-pub static TIME_THROW_GEAR: u64 =
-    (TIME_THROW_1MM as f32 * DISTANCE_BETWEEN_POSITIONS as f32) as u64;
+pub static TIME_THROW_1MM: f32 = (TIME_THROW_TOTAL as f32 / DISTANCE_THROW_TOTAL) as f32;
+pub static TIME_THROW_GEAR: f32 = (TIME_THROW_1MM * DISTANCE_BETWEEN_POSITIONS) as f32;
 
 static RESISTANCE_THROW_TOTAL: u16 = RESISTANCE_THROW_MAX - RESISTANCE_THROW_MIN;
 static RESISTANCE_THROW_1MM: u16 = (RESISTANCE_THROW_TOTAL as f32 / DISTANCE_THROW_TOTAL) as u16;
@@ -69,9 +68,9 @@ static RESISTANCE_ALLOWED_GEAR_DIFFERENCE: u16 =
 
 // -----
 
-// Pre-calculate the proper gear mode positions, based on the start position
+// Pre-calculate the proper gear mode positions, based on the start position (Ω).
 // (which is where the 'D' mode is - max pulled in).
-static GEAR_D: u16 = RESISTANCE_FIRST_GEAR;        // Button::D
+static GEAR_D: u16 = RESISTANCE_FIRST_GEAR; // Button::D
 static GEAR_N: u16 = GEAR_D + RESISTANCE_PER_GEAR; // Button::N
 static GEAR_R: u16 = GEAR_N + RESISTANCE_PER_GEAR; // Button::R
 static GEAR_P: u16 = GEAR_R + RESISTANCE_PER_GEAR; // Button::P
@@ -162,27 +161,19 @@ impl<'l> Actuator<'l> {
         // Output some basic info we're using.
         info!(
             "Distance between gear positions={}mm; Throw time/mm={}ms; Trow time/gear={}ms",
-            DISTANCE_BETWEEN_POSITIONS,
-            TIME_THROW_1MM,
-            TIME_THROW_GEAR
+            DISTANCE_BETWEEN_POSITIONS, TIME_THROW_1MM, TIME_THROW_GEAR
         );
         info!(
             "Throw resistance/mm={}Ω; Throw resistance/gear={}Ω; Throw resistance/total={}Ω",
-            RESISTANCE_THROW_1MM,
-            RESISTANCE_PER_GEAR,
-            RESISTANCE_THROW_TOTAL
+            RESISTANCE_THROW_1MM, RESISTANCE_PER_GEAR, RESISTANCE_THROW_TOTAL
         );
         info!(
             "Allowed gear difference={}mm/{}Ω",
-            DISTANCE_ALLOWED_GEAR_DIFFERENCE,
-            RESISTANCE_ALLOWED_GEAR_DIFFERENCE
+            DISTANCE_ALLOWED_GEAR_DIFFERENCE, RESISTANCE_ALLOWED_GEAR_DIFFERENCE
         );
         info!(
             "Positions: GearP={:?}Ω; GearR={:?}Ω; GearN={:?}Ω; GearD={:?}Ω",
-            GEAR_P,
-            GEAR_R,
-            GEAR_N,
-            GEAR_D
+            GEAR_P, GEAR_R, GEAR_N, GEAR_D
         );
 
         //        // Setup a vector with our gear mode positions.
@@ -224,7 +215,7 @@ impl<'l> Actuator<'l> {
         // ----- Move actuator 2mm forward.
         debug!("test_actuator(): Move actuator 2mm forward");
         if !self
-            .move_actuator((TIME_THROW_1MM as u64) * 2, Direction::Forward)
+            .move_actuator(TIME_THROW_1MM * 2.0, Direction::Forward)
             .await
         {
             // Did not move - return test failure.
@@ -236,7 +227,7 @@ impl<'l> Actuator<'l> {
         // ----- Move actuator 2mm backward.
         debug!("test_actuator(): Move actuator 2mm backward");
         if !self
-            .move_actuator((TIME_THROW_1MM as u64) * 2, Direction::Backward)
+            .move_actuator(TIME_THROW_1MM * 2.0, Direction::Backward)
             .await
         {
             // Did not move - return test failure.
@@ -253,33 +244,15 @@ impl<'l> Actuator<'l> {
 
         // Verify overall move.
         let moved = self.verify_moved(position_start, position_end);
-        info!("Verifying total move ({}/{}): {}", position_start, position_end, moved);
-        if ! moved {
+        info!(
+            "Verifying total move ({}/{}): {}",
+            position_start, position_end, moved
+        );
+        if !moved {
             // Have moved (it didn't return to original position) - return test failure.
             error!("Actuator have not moved - test failure (#3/3)");
             return false;
         }
-
-        //        // ===== Move the actuator to the nearest gear mode.
-        //
-        //        // Find our closest gear mode.
-        //        debug!("test_actuator(): Move actuator to closest gear mode");
-        //        let correct_position = self.find_closest_gear_mode(position_end);
-        //        trace!(
-        //            "test_actuator(): Current position={}; Correct position={}",
-        //            position_end,
-        //            correct_position
-        //        );
-        //
-        //        // Move the actuator into position.
-        //        let direction: Direction;
-        //        let amount: i16 = (correct_position as i16 - position_end as i16).abs();
-        //        if amount < 0 {
-        //            direction = Direction::Backward;
-        //        } else {
-        //            direction = Direction::Forward;
-        //        }
-        //        self.move_actuator(amount as u64, direction).await;
 
         return true;
     }
@@ -288,11 +261,11 @@ impl<'l> Actuator<'l> {
     pub async fn change_gear_mode(&mut self, mode: GearModes) {
         debug!("change_gear_mode({})", mode);
 
-        // Find current position.
+        // Find current position - Ω.
         let current_position = self.read_pot().await;
         debug!("change_gear_mode(): Current position={}Ω", current_position);
 
-        // Find position for new gear mode.
+        // Set position for new gear mode - Ω.
         let destination_position: u16;
         match mode {
             GearModes::P => destination_position = GEAR_P,
@@ -305,16 +278,21 @@ impl<'l> Actuator<'l> {
             destination_position
         );
 
-        // Move the actuator into position.
+        // Calculate how long to move the actuator - ms.
+        let amount: f32 =
+            (destination_position as i16 - current_position as i16).abs() as f32 / TIME_THROW_1MM;
+
+        // .. in what direction.
         let direction: Direction;
-        let amount: i16 = (destination_position as i16 - current_position as i16).abs();
         trace!("change_gear_mode(): amount={}", amount);
         if current_position < destination_position {
             direction = Direction::Forward;
         } else {
             direction = Direction::Backward;
         }
-        self.move_actuator(amount as u64, direction).await;
+
+        // Move the actuator into position.
+        self.move_actuator(amount, direction).await;
     }
 
     // ==================================================
@@ -394,15 +372,15 @@ impl<'l> Actuator<'l> {
         debug!("Reading actuator potentiometer value");
         loop {
             // Settle the actuator before we read.
-	    // NOTE: CRASH - 25ms causes the Pico to crash!
-	    //       However, 50ms seems to work fine..
+            // NOTE: CRASH - 25ms causes the Pico to crash!
+            //       However, 50ms seems to work fine..
             trace!("read_pot(): Sleeping 50ms");
             Timer::after_millis(50).await;
             trace!("read_pot(): Sleeping 50ms - done");
-	    // NOTE: CRASH - Something that 'done' debug works!
-	    //       Could it be the `adc.read()` that fails!?
-	    //       BUT, only on the initial boot! If the Pico have
-	    //       crashed, it keeps crashing on the `adc.read()`.
+            // NOTE: CRASH - Something that 'done' debug works!
+            //       Could it be the `adc.read()` that fails!?
+            //       BUT, only on the initial boot! If the Pico have
+            //       crashed, it keeps crashing on the `adc.read()`.
 
             match self.adc.read(&mut self.feedback).await {
                 Ok(val) => {
@@ -417,9 +395,7 @@ impl<'l> Actuator<'l> {
 
                         debug!(
                             "Actuator lowest: {:?}; highest: {:?}; average: {:?}",
-                            lowest,
-                            highest,
-                            average as f32
+                            lowest, highest, average as f32
                         );
                         return average as u16;
                     }
@@ -442,7 +418,16 @@ impl<'l> Actuator<'l> {
     }
 
     // Move the actuator - distance (in milliseconds).
-    pub async fn move_actuator(&mut self, distance: u64, direction: Direction) -> bool {
+    // TODO: This should probably be "to position" (Ω) instead of time.
+    //         * Move Xms
+    //         * Check the position (Ω)
+    //         * If it's not within +/- DISTANCE_ALLOWED_GEAR_DIFFERENCE
+    //           then keep moving (or change direction).
+    //       OR
+    //       Keep this, but call it from `change_gear_mode()` and `test_actuator()` etc in short bursts,
+    //       and *there* check the position (within +/- DISTANCE_ALLOWED_GEAR_DIFFERENCE).
+    //       BUT, then we need to return Ω here instead.
+    pub async fn move_actuator(&mut self, distance: f32, direction: Direction) -> bool {
         debug!("Moving actuator: {}/{}", distance, direction);
 
         // Set both pins to LOW to brake the motor in the actuator.
@@ -459,7 +444,7 @@ impl<'l> Actuator<'l> {
         );
 
         // Move actuator for Xms in `direction`.
-	// TODO: It seems the timer crashes if the distance in ms is < 50ms!
+        // TODO: It seems the timer crashes if the distance in ms is < 50ms!??!
         if direction == Direction::Forward {
             debug!(
                 "move_actuator(): Move actuator: direction=FORWARD; distance={}ms",
@@ -469,7 +454,7 @@ impl<'l> Actuator<'l> {
             trace!("move_actuator(): (F1/4)");
             self.motor_plus.set_high();
             trace!("move_actuator(): (F2/4) - distance={}ms", distance);
-            Timer::after_millis(distance).await; // TODO: CRASH!!
+            Timer::after_millis(distance as u64).await; // TODO: CRASH!!
             trace!("move_actuator(): (F3/4)");
             self.motor_plus.set_low();
             trace!("move_actuator(): (F4/4)");
@@ -482,7 +467,7 @@ impl<'l> Actuator<'l> {
             trace!("move_actuator(): (B1/4)");
             self.motor_minus.set_high();
             trace!("move_actuator(): (B2/4) - distance={}ms", distance);
-            Timer::after_millis(distance).await; // TODO: CRASH!!
+            Timer::after_millis(distance as u64).await; // TODO: CRASH!!
             trace!("move_actuator(): (B3/4)");
             self.motor_minus.set_low();
             trace!("move_actuator(): (B4/4)");
