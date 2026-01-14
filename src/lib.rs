@@ -11,7 +11,6 @@ use embassy_time::Timer;
 
 //use core::marker::PhantomData;
 use core::mem::transmute;
-//use heapless::Vec;
 
 // ==============================
 // Setup static values, measured on the actuator.
@@ -126,7 +125,6 @@ pub struct Actuator<'l> {
     v_select: Output<'l>,
     feedback: Channel<'l>,
     adc: Adc<'l, Async>,
-    //gear_positions: Vec<u16, 4>,
     //phantom: PhantomData<&'l PotPin>,
 }
 
@@ -190,13 +188,6 @@ impl<'l> Actuator<'l> {
             GEAR_P, GEAR_R, GEAR_N, GEAR_D
         );
 
-        // // Setup a vector with our gear mode positions.
-        // let mut positions: Vec<u16, 4> = heapless::Vec::new(); // Return buffer.
-        // positions.push(GEAR_D).unwrap();
-        // positions.push(GEAR_N).unwrap();
-        // positions.push(GEAR_R).unwrap();
-        // positions.push(GEAR_P).unwrap();
-
         // -----
         // Initialize our struct.
         Self {
@@ -205,7 +196,6 @@ impl<'l> Actuator<'l> {
             v_select: actuator_voltage_select,
             feedback: actuator_potentiometer,
             adc: adc,
-            //gear_positions: positions,
             //phantom: PhantomData,
         }
     }
@@ -324,28 +314,6 @@ impl<'l> Actuator<'l> {
     // ==================================================
     // Private functions.
     // ==================================================
-
-    // fn find_closest_gear_mode(&self, target: u16) -> u16 {
-    //     debug!("[actuator] find_closest_gear_mode({})", target);
-
-    //     // Initialize variables to track the closest value and its difference
-    //     let mut closest_value = self.gear_positions[0];
-    //     let mut min_difference = u16::MAX;
-
-    //     // Iterate through the values and calculate the difference
-    //     for mode in &self.gear_positions {
-    //         trace!("[actuator] let difference = {} - {}", mode, target);
-    //         let difference = mode - target;
-
-    //         // Update the closest value if a smaller difference is found
-    //         if difference < min_difference {
-    //             min_difference = difference;
-    //             closest_value = *mode;
-    //         }
-    //     }
-
-    //     return closest_value;
-    // }
 
     // Check if after-move position is between pos1 max/min.
     // Returns:
