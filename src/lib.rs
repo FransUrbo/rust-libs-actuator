@@ -1,6 +1,6 @@
 #![no_std]
 
-use defmt::{debug, error, info, trace, Format};
+use defmt::{debug, error, info, trace, warn, Format};
 
 use embassy_rp::adc::{Adc, AdcPin, Async, Channel, Config, InterruptHandler};
 use embassy_rp::gpio::{AnyPin, Drive, Level, Output, Pull, SlewRate};
@@ -9,7 +9,6 @@ use embassy_rp::peripherals::ADC;
 use embassy_rp::Peri;
 use embassy_time::Timer;
 
-//use core::marker::PhantomData;
 use core::mem::transmute;
 
 // ==============================
@@ -54,8 +53,7 @@ static DISTANCE_THROW_TOTAL: f32 = 101.56; // mm
 // ==============================
 // Calculate values based on the static's..
 
-// These two are public, because if/when we need to test the actuator, we need to
-// know them..
+// These are public, because if/when we need to test the actuator, we need to know them.
 pub static TIME_THROW_1MM: f32 = (TIME_THROW_TOTAL as f32 / DISTANCE_THROW_TOTAL) as f32;
 pub static TIME_THROW_GEAR: f32 = (TIME_THROW_1MM * DISTANCE_BETWEEN_POSITIONS) as f32;
 
@@ -63,10 +61,10 @@ pub static RESISTANCE_THROW_TOTAL: u16 = RESISTANCE_THROW_MAX - RESISTANCE_THROW
 pub static RESISTANCE_THROW_1MM: u16 =
     (RESISTANCE_THROW_TOTAL as f32 / DISTANCE_THROW_TOTAL) as u16;
 
+// -----
+
 static RESISTANCE_ALLOWED_GEAR_DIFFERENCE: u16 =
     (DISTANCE_ALLOWED_GEAR_DIFFERENCE as u16) * RESISTANCE_THROW_1MM;
-
-// -----
 
 // Pre-calculate the proper gear mode positions, based on the start position (Ω).
 // (which is where the 'D' mode is - max pulled in).
@@ -120,12 +118,9 @@ impl From<u8> for GearModes {
 pub struct Actuator<'l> {
     motor_plus: Output<'l>,
     motor_minus: Output<'l>,
-    #[allow(dead_code)]
-    // TODO: Remove once we've figured out how to move the actuator to specific location.
     v_select: Output<'l>,
     feedback: Channel<'l>,
     adc: Adc<'l, Async>,
-    //phantom: PhantomData<&'l PotPin>,
 }
 
 impl<'l> Actuator<'l> {
@@ -133,7 +128,7 @@ impl<'l> Actuator<'l> {
         pin_motor_plus: Peri<'l, AnyPin>,
         pin_motor_minus: Peri<'l, AnyPin>,
         pin_volt_select: Peri<'l, AnyPin>,
-        pot_pin: Peri<'l, impl AdcPin + 'l>,
+        pin_pot: Peri<'l, impl AdcPin + 'l>,
         adc: Peri<'l, ADC>,
         irqs: impl Binding<ADC_IRQ_FIFO, InterruptHandler>,
     ) -> Self {
@@ -146,7 +141,7 @@ impl<'l> Actuator<'l> {
         // -----
         // Initialize the potentiometer pin.
         let adc = Adc::new(adc, irqs, Config::default());
-        let actuator_potentiometer = Channel::new_pin(pot_pin, Pull::None);
+        let actuator_potentiometer = Channel::new_pin(pin_pot, Pull::None);
 
         // -----
         // Setup the motor pins.
@@ -196,11 +191,14 @@ impl<'l> Actuator<'l> {
             v_select: actuator_voltage_select,
             feedback: actuator_potentiometer,
             adc: adc,
-            //phantom: PhantomData,
         }
     }
 
-    // Test actuator control. Move it forward 2mm, then backward 2mm.
+    // ==================================================
+    // Public functions.
+    // ==================================================
+
+    // Test actuator control. Move it forward 5mm, then backward 5mm.
     // This *should* be safe to do EVEN IF (!!) we're moving (for whatever reason).
     // Returns:
     //   * TRUE  => Have moved. As in, it moved the distance back and forth and then returned.
@@ -225,7 +223,7 @@ impl<'l> Actuator<'l> {
             test_distance
         );
         if !self
-            .move_actuator(RESISTANCE_THROW_1MM * test_distance, Direction::Forward)
+            .move_actuator(position_start + (RESISTANCE_THROW_1MM * test_distance))
             .await
         {
             // Did not move - return test failure.
@@ -240,7 +238,7 @@ impl<'l> Actuator<'l> {
             test_distance
         );
         if !self
-            .move_actuator(RESISTANCE_THROW_1MM * test_distance, Direction::Backward)
+            .move_actuator(position_start - (RESISTANCE_THROW_1MM * test_distance))
             .await
         {
             // Did not move - return test failure.
@@ -256,7 +254,7 @@ impl<'l> Actuator<'l> {
         );
 
         // Verify overall move.
-        let moved = self.verify_moved(position_start, position_end);
+        let moved = self.verify_moved(position_start, position_end).await;
         info!(
             "[actuator] Verifying total move ({}/{}): {}",
             position_start, position_end, moved
@@ -271,44 +269,24 @@ impl<'l> Actuator<'l> {
     }
 
     // Move the actuator to a specific gear mode position.
-    pub async fn change_gear_mode(&mut self, mode: GearModes) {
+    pub async fn change_gear_mode(&mut self, mode: GearModes) -> bool {
         debug!("[actuator] change_gear_mode({})", mode);
 
-        // Find current position - Ω.
-        let current_position = self.read_pot().await;
-        debug!(
-            "[actuator] change_gear_mode(): Current position={}Ω",
-            current_position
-        );
-
         // Set position for new gear mode - Ω.
-        let destination_position: u16;
+        let destination: u16;
         match mode {
-            GearModes::P => destination_position = GEAR_P,
-            GearModes::R => destination_position = GEAR_R,
-            GearModes::N => destination_position = GEAR_N,
-            GearModes::D => destination_position = GEAR_D,
+            GearModes::P => destination = GEAR_P,
+            GearModes::R => destination = GEAR_R,
+            GearModes::N => destination = GEAR_N,
+            GearModes::D => destination = GEAR_D,
         }
         debug!(
-            "[actuator] change_gear_mode(): Destination position={}Ω",
-            destination_position
+            "[actuator] change_gear_mode(): Destination={}Ω",
+            destination
         );
-
-        // Calculate how long to move the actuator - ms.
-        let amount: u16 = ((destination_position as i16 - current_position as i16).abs()
-            / RESISTANCE_THROW_1MM as i16) as u16;
-
-        // .. in what direction.
-        let direction: Direction;
-        trace!("[actuator] change_gear_mode(): amount={}", amount);
-        if current_position < destination_position {
-            direction = Direction::Forward;
-        } else {
-            direction = Direction::Backward;
-        }
 
         // Move the actuator into position.
-        self.move_actuator(amount, direction).await;
+        return self.move_actuator(destination).await;
     }
 
     // ==================================================
@@ -319,7 +297,7 @@ impl<'l> Actuator<'l> {
     // Returns:
     //   * TRUE  => Have moved.
     //   * FALSE => Have not moved.
-    fn verify_moved(&mut self, before: u16, after: u16) -> bool {
+    async fn verify_moved(&mut self, before: u16, after: u16) -> bool {
         // NOTE: We only check that it HAVE moved, not with how much.
         // NOTE: Take a +-10Ω difference on the reading. The ADC in the Pico isn't very accurate.
         trace!(
@@ -354,6 +332,24 @@ impl<'l> Actuator<'l> {
         }
     }
 
+    // Brake the actuator - set both pins to LOW.
+    // NOTE: Does NOT like having this as an async!
+    fn brake_actuator(&mut self) {
+        if self.motor_plus.is_set_high() || self.motor_minus.is_set_high() {
+            debug!("[actuator] Breaking actuator");
+        }
+
+        if self.motor_plus.is_set_high() {
+            self.motor_plus.set_low();
+        }
+
+        if self.motor_minus.is_set_high() {
+            self.motor_minus.set_low();
+        }
+
+        return;
+    }
+
     // ==================================================
     // NOTE: These should really be private functions, but I need them to do the calibration.
     // ==================================================
@@ -364,12 +360,6 @@ impl<'l> Actuator<'l> {
         let mut pos = 0;
         let mut lowest: u16 = 0;
         let mut highest: u16 = 0;
-
-        // Set both pins to LOW to brake the motor in the actuator.
-        // Can't seem to read the pot while the actuator is moving.
-        debug!("[actuator] Breaking actuator");
-        self.motor_plus.set_low();
-        self.motor_minus.set_low();
 
         debug!("[actuator] Reading actuator potentiometer value");
         loop {
@@ -413,106 +403,114 @@ impl<'l> Actuator<'l> {
         }
     }
 
-    // Move the actuator - distance (in Ω).
-    pub async fn move_actuator(&mut self, distance: u16, direction: Direction) -> bool {
-        debug!("[actuator] Move actuator: {}Ω/{}", distance, direction);
-
-        let position_end: i16;
+    // Move the actuator to `position` (in Ω).
+    pub async fn move_actuator(&mut self, position: u16) -> bool {
         let mut position_now: u16;
+        let mut direction: Direction;
+
+        debug!("[actuator] Move actuator to postition {}Ω", position);
 
         // Read the actuator feedback before we start moving.
         position_now = self.read_pot().await;
         debug!(
-            "[actuator] Move Actuator: Pot value - before move: {}",
+            "[actuator] Move Actuator: Pot value - before move: {}Ω",
             position_now
         );
 
-        // Where do we want it moved?
-        if direction == Direction::Forward {
-            position_end = (position_now as i16).abs() + distance as i16;
-            debug!(
-                "[actuator] position_end({}) = position_now({}) + {}",
-                position_end,
-                (position_now as i16).abs(),
-                distance
-            );
+        // Decide in what direction to go. If we're trying to go beyond the end, then return.
+        if position_now < position {
+            direction = Direction::Forward;
+
+            if position > RESISTANCE_THROW_MAX {
+                warn!("[actuator] We've been asked to go beyond maximum throw");
+                return true; // TODO: Isn't this technically an error!?
+            }
         } else {
-            position_end = (position_now as i16).abs() - distance as i16;
-            debug!(
-                "[actuator] position_end({}) = position_now({}) - {}",
-                position_end,
-                (position_now as i16).abs(),
-                distance
-            );
-        }
-        debug!("[actuator] Final position wanted: {}", position_end);
+            direction = Direction::Backward;
 
-        if (position_end >= RESISTANCE_THROW_TOTAL as i16) && (direction == Direction::Forward) {
-            info!("[actuator] We're beyond total throw, return");
-            return true;
-        } else if (position_end <= RESISTANCE_THROW_MIN as i16)
-            && (direction == Direction::Backward)
-        {
-            info!("[actuator] We're beyond minimum throw, return");
-            return true;
+            if position < RESISTANCE_THROW_MIN {
+                warn!("[actuator] We've been asked to go beyond minimum throw");
+                return true; // TODO: Isn't this technically an error!?
+            }
         }
 
-        let mut left2move: i16;
+        // We only need know how much left to move, so that we can switch between 12V and 5V drive.
+        // NOTE: It doesn't seem to be necessary though, because I can get within less than 1mm anyway on 12V!
+        let mut left2move: u16;
         loop {
-            left2move = (position_end - position_now as i16).abs();
+            // Double check that the feedback value is sane.
+            // However, we can get all sorts of random values here, so this isn't 100% :(.
+            // But because we're doing it *inside* the loop, instead of at the entrence of the
+            // function, we have a slightly higher chance of catching it..
+            if position_now > (RESISTANCE_THROW_MAX + RESISTANCE_THROW_1MM)
+                || position_now < (RESISTANCE_THROW_MIN - RESISTANCE_THROW_1MM)
+            {
+                error!("[actuator] Impossible reading - is the actuator connected?");
+                debug!(
+                    "[actuator] ({} > {}) || ({} < {})",
+                    position_now,
+                    (RESISTANCE_THROW_MAX + RESISTANCE_THROW_1MM),
+                    position_now,
+                    (RESISTANCE_THROW_MIN - RESISTANCE_THROW_1MM)
+                );
+                self.brake_actuator(); // Brake the actuator before we leave.
+                return false;
+            }
+
+            left2move = ((position as i16 - position_now as i16).abs()) as u16;
             debug!(
-                "[actuator] Check move: want={} - now={} = left={}",
-                position_end, position_now, left2move
+                "[actuator] Check move: (want={}) - (now={}) = (left={})",
+                position, position_now, left2move
             );
 
-            // If we're very close (+/- 2mm), then we're in position.
-            // NOTE: 1mm seems to cause a reset.
-            if left2move <= (RESISTANCE_THROW_1MM as i16 * 2) {
-                debug!("[actuator] We're within 2mm - DONE");
-                break;
+            trace!(
+                "[actuator] Pin+:{:?}; Pin-:{:?}",
+                self.motor_plus.is_set_high(),
+                self.motor_minus.is_set_high()
+            );
 
-            // If we're close (+/- 10mm), then switch to 5V drive.
-            } else if left2move <= (RESISTANCE_THROW_1MM as i16 * 10)
-                && !self.v_select.is_set_high()
-            {
-                debug!("[actuator] Set level  5V");
+            // If we're VERY close (< 1mm/16Ω), then we're in position.
+            if left2move < RESISTANCE_THROW_1MM {
+                // TODO: We're still crashing here every now and then.
+                //       Sometimes we get this debug, sometimes we get the one in `brake_actuator()`,
+                //       sometimes neither. Sometimes we get "malformed frame skipped"!!
+                debug!("[actuator] We're within +/- 1mm - DONE");
+                self.brake_actuator(); // Brake the actuator before we leave.
+                return true;
 
-                self.motor_plus.set_low();
-                self.motor_minus.set_low();
+            // If we're close (< 5mm/80Ω), then switch to 5V drive.
+            } else if left2move < (RESISTANCE_THROW_1MM * 5) && !self.v_select.is_set_high() {
+                self.brake_actuator(); // Brake the actuator before we change the level.
+                debug!("[actuator] Set level:  5V");
+                self.v_select.set_high();
 
-                self.v_select.set_level(Level::High);
+            // We have a long way to go (> 10mm/160Ω), switch to 12V drive.
+            } else if left2move >= (RESISTANCE_THROW_1MM * 10) && !self.v_select.is_set_low() {
+                self.brake_actuator(); // Brake the actuator before we change the level.
+                debug!("[actuator] Set level: 12V");
+                self.v_select.set_low();
 
-            // We have a long way left, switch to 12V drive.
-            } else if left2move >= (RESISTANCE_THROW_1MM as i16 * 15) && !self.v_select.is_set_low()
-            {
-                debug!("[actuator] Set level 12V");
-
-                self.motor_plus.set_low();
-                self.motor_minus.set_low();
-
-                self.v_select.set_level(Level::Low);
+            // We've gone beyond our desired position.
+            } else if direction == Direction::Backward && position >= position_now {
+                warn!("[actuator] We've gone beyond our desired position - go forward");
+                self.brake_actuator(); // Brake the actuator before we change direction.
+                direction = Direction::Forward;
+            } else if direction == Direction::Forward && position <= position_now {
+                warn!("[actuator] We've gone beyond our desired position - go backward");
+                self.brake_actuator(); // Brake the actuator before we change direction.
+                direction = Direction::Backward;
             }
 
             // Start moving the actuator in `direction`
-            if direction == Direction::Forward {
-                debug!("[actuator] Move actuator: direction=FORWARD");
+            debug!("[actuator] Moving actuator: direction={}", direction);
+            if direction == Direction::Forward && !self.motor_plus.is_set_high() {
                 self.motor_plus.set_high();
-            } else {
-                debug!("[actuator] Move actuator: direction=BACKWARD");
+            } else if direction == Direction::Backward && !self.motor_minus.is_set_high() {
                 self.motor_minus.set_high();
             }
 
-            // Check every 5ms
-            Timer::after_millis(5).await;
-
-            // Read the actuator feedback now that we've moved.
+            // Read the actuator feedback now that we're moving.
             position_now = self.read_pot().await;
-            debug!(
-                "[actuator] Move Actuator: Pot value - after move: {}",
-                position_now
-            );
         }
-
-        return true;
     }
 }
