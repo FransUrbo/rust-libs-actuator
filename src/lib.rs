@@ -106,6 +106,10 @@ impl GearModes {
             _ => panic!("Unknown value: {}", v),
         }
     }
+
+    pub fn iterator() -> impl Iterator<Item = GearModes> {
+        [Self::P, Self::R, Self::N, Self::D].iter().copied()
+    }
 }
 
 impl From<u8> for GearModes {
