@@ -21,11 +21,6 @@ pub static RESISTANCE_THROW_MIN: u16 = 240; // Ω	-- Fully retracted
 pub static RESISTANCE_THROW_MAX: u16 = 1950; // Ω	-- Fully extended
 
 // Measured values:
-// 'P' starts `RESISTANCE_FIRST_GEAR` (~12mm) from outer endpoint.
-//   * 'P': 1630Ω
-//   * 'R': 1230Ω
-//   * 'N':  830Ω
-//   * 'D':  430Ω
 static RESISTANCE_FIRST_GEAR: u16 = 430;
 static RESISTANCE_PER_GEAR: u16 = 400;
 
@@ -67,11 +62,15 @@ static RESISTANCE_ALLOWED_GEAR_DIFFERENCE: u16 =
     (DISTANCE_ALLOWED_GEAR_DIFFERENCE as u16) * RESISTANCE_THROW_1MM;
 
 // Pre-calculate the proper gear mode positions, based on the start position (Ω).
-// (which is where the 'D' mode is - max pulled in).
-static GEAR_D: u16 = RESISTANCE_FIRST_GEAR; // Button::D
-static GEAR_N: u16 = GEAR_D + RESISTANCE_PER_GEAR; // Button::N
-static GEAR_R: u16 = GEAR_N + RESISTANCE_PER_GEAR; // Button::R
-static GEAR_P: u16 = GEAR_R + RESISTANCE_PER_GEAR; // Button::P
+// (which is where the 'D' mode is - max extended).
+//   * 'P':  430Ω
+//   * 'R':  830Ω
+//   * 'N': 1230Ω
+//   * 'D': 1630Ω
+static GEAR_P: u16 = RESISTANCE_FIRST_GEAR;
+static GEAR_R: u16 = GEAR_P + RESISTANCE_PER_GEAR;
+static GEAR_N: u16 = GEAR_R + RESISTANCE_PER_GEAR;
+static GEAR_D: u16 = GEAR_N + RESISTANCE_PER_GEAR;
 
 // How many times to read the actuator potentiometer and get an average of the reads.
 // NOTE: 50ms delay between reads * this = time!! Don't query to many times, or we'll
@@ -210,7 +209,8 @@ impl<'l> Actuator<'l> {
     pub async fn test_actuator(&mut self) -> bool {
         info!("[actuator] Testing actuator control");
 
-        let test_distance: u16 = 5;
+        let test_distance: u16 = 5; // How far to move it back and forth.
+        let position: u16; // Where we want the actuator.
 
         // ===== Verify that the actuator works by moving it back and forth.
 
@@ -221,30 +221,32 @@ impl<'l> Actuator<'l> {
             position_start
         );
 
-        // ----- Move actuator Xmm forward.
+        if position_start < (RESISTANCE_THROW_MIN + (RESISTANCE_THROW_1MM * (test_distance + 2))) {
+            // Need to go forward.
+            position = position_start + (RESISTANCE_THROW_1MM * test_distance);
+        } else {
+            // Need to go backward.
+            position = position_start - (RESISTANCE_THROW_1MM * test_distance);
+        }
+
+        // ----- Move actuator Xmm.
         debug!(
-            "[actuator] Test Actuator: Move actuator {}mm forward",
-            test_distance
+            "[actuator] Test Actuator: Move actuator {}mm; from={} to={}",
+            test_distance, position_start, position
         );
-        if !self
-            .move_actuator(position_start + (RESISTANCE_THROW_1MM * test_distance))
-            .await
-        {
+        if !self.move_actuator(position).await {
             // Did not move - return test failure.
             error!("[actuator] Actuator have not moved - test failure (#1/3)");
             return false;
         }
         Timer::after_millis(250).await;
 
-        // ----- Move actuator Xmm backward.
+        // ----- Move actuator Xmm back.
         debug!(
-            "[actuator] Test Actuator: Move actuator {}mm backward",
-            test_distance
+            "[actuator] Test Actuator: Move actuator {}mm; from={} to={}",
+            test_distance, position, position_start
         );
-        if !self
-            .move_actuator(position_start - (RESISTANCE_THROW_1MM * test_distance))
-            .await
-        {
+        if !self.move_actuator(position_start).await {
             // Did not move - return test failure.
             error!("[actuator] Actuator have not moved - test failure (#2/3)");
             return false;
@@ -303,28 +305,29 @@ impl<'l> Actuator<'l> {
     //   * FALSE => Have not moved.
     async fn verify_moved(&mut self, before: u16, after: u16) -> bool {
         // NOTE: We only check that it HAVE moved, not with how much.
-        // NOTE: Take a +-10Ω difference on the reading. The ADC in the Pico isn't very accurate.
+        // NOTE: Take a +/- 1mm (16Ω) difference on the reading.
+        //       This because we're stopping the actuator if we're *within* 1mm of destination.
         trace!(
             "[actuator] verify_moved(before={}, after={})",
             before,
             after
         );
-        if before < 25 {
+        if before < (RESISTANCE_THROW_MIN - RESISTANCE_THROW_1MM) {
             debug!(
                 "[actuator] Can't verify move, no resonable value from pot - return 'FALSE' (Have NOT moved)"
             );
             return false;
         }
 
-        let before_min = before - RESISTANCE_ALLOWED_GEAR_DIFFERENCE;
-        let before_max = before + RESISTANCE_ALLOWED_GEAR_DIFFERENCE;
+        let before_min = before - RESISTANCE_THROW_1MM;
+        let before_max = before + RESISTANCE_THROW_1MM;
         trace!(
             "[actuator] verify_moved(): (after({}) > before_min({})) && (after({}) < before_max({})); Diff={}",
             after,
             before_min,
             after,
             before_max,
-            RESISTANCE_ALLOWED_GEAR_DIFFERENCE
+            RESISTANCE_THROW_1MM
         );
 
         if (after > before_min) && (after < before_max) {
