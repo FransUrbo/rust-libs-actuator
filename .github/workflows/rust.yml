@@ -87,11 +87,16 @@ jobs:
       - name: Build ${{ matrix.target }}
         run: cargo build --verbose --profile ${{ matrix.target }}
 
+      - name: Generate checksums
+        run: |
+          sha256sum target/thumbv6m-none-eabi/${{ matrix.target == 'dev' && 'debug' || matrix.target }}/libactuator.rlib > target/thumbv6m-none-eabi/${{ matrix.target == 'dev' && 'debug' || matrix.target }}/libactuator.rlib.sha256
+
       - name: Archive artifacts
         uses: actions/upload-artifact@v4
         with:
           name: artifacts-${{ matrix.target }}
           path: |
             target/thumbv6m-none-eabi/${{ matrix.target == 'dev' && 'debug' || matrix.target }}/libactuator.rlib
+            target/thumbv6m-none-eabi/${{ matrix.target == 'dev' && 'debug' || matrix.target }}/libactuator.rlib.sha256
             _check-package.log
             _check-fmt.log
