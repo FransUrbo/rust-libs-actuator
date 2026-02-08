@@ -304,33 +304,21 @@ impl<'l> Actuator<'l> {
     //   * TRUE  => Have moved.
     //   * FALSE => Have not moved.
     async fn verify_moved(&mut self, before: u16, after: u16) -> bool {
+        let min = before - RESISTANCE_THROW_1MM;
+        let max = before + RESISTANCE_THROW_1MM;
+
         // NOTE: We only check that it HAVE moved, not with how much.
-        // NOTE: Take a +/- 1mm (16Ω) difference on the reading.
+        // NOTE: Take a +/- 1/2mm (8Ω) difference on the reading.
         //       This because we're stopping the actuator if we're *within* 1mm of destination.
         trace!(
-            "[actuator] verify_moved(before={}, after={})",
+            "[actuator] verify_moved(before={}>{}, after={}<{})",
             before,
-            after
-        );
-        if before < (RESISTANCE_THROW_MIN - RESISTANCE_THROW_1MM) {
-            debug!(
-                "[actuator] Can't verify move, no resonable value from pot - return 'FALSE' (Have NOT moved)"
-            );
-            return false;
-        }
-
-        let before_min = before - RESISTANCE_THROW_1MM;
-        let before_max = before + RESISTANCE_THROW_1MM;
-        trace!(
-            "[actuator] verify_moved(): (after({}) > before_min({})) && (after({}) < before_max({})); Diff={}",
+            min,
             after,
-            before_min,
-            after,
-            before_max,
-            RESISTANCE_THROW_1MM
+            max
         );
 
-        if (after > before_min) && (after < before_max) {
+        if after >= min && after <= max {
             debug!("[actuator] Verify Moved: TRUE");
             return true;
         } else {
